@@ -1,9 +1,14 @@
 package com.example.englishtutor
 
+import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -115,6 +120,11 @@ fun Chat(savedKey: String, saveKey: (String) -> Unit, speak: (String) -> Unit) {
         }
     }
 
+    val mic = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        val t = r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (r.resultCode == Activity.RESULT_OK && t != null) { input = t; send() }
+    }
+
     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(12.dp)) {
         if (editKey) {
             OutlinedTextField(
@@ -151,8 +161,26 @@ fun Chat(savedKey: String, saveKey: (String) -> Unit, speak: (String) -> Unit) {
                 value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f),
                 placeholder = { Text("Write in English…") }
             )
-            Spacer(Modifier.width(8.dp))
-            Button(onClick = { send() }, enabled = key.isNotEmpty()) { Text("Send") }
+            Spacer(Modifier.width(6.dp))
+            Button(
+                onClick = {
+                    val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in English")
+                    }
+                    try { mic.launch(i) } catch (e: Exception) {
+                        error = "No hay reconocimiento de voz. Usa el micrófono del teclado."
+                    }
+                },
+                enabled = key.isNotEmpty() && !loading,
+                contentPadding = PaddingValues(horizontal = 12.dp)
+            ) { Text("🎤") }
+            Spacer(Modifier.width(6.dp))
+            Button(
+                onClick = { send() }, enabled = key.isNotEmpty(),
+                contentPadding = PaddingValues(horizontal = 12.dp)
+            ) { Text("➤") }
         }
     }
 }
