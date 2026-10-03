@@ -2,6 +2,7 @@ package com.example.englishtutor
 
 import android.app.Activity
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
@@ -48,17 +49,7 @@ const val SYSTEM = "You are a friendly English tutor for a Spanish speaker. " +
 
 data class Msg(val fromUser: Boolean, val text: String)
 
-fun askGemini(key: String, history: List<Msg>): String {
-    val contents = JSONArray()
-    history.forEach {
-        contents.put(
-            JSONObject().put("role", if (it.fromUser) "user" else "model")
-                .put("parts", JSONArray().put(JSONObject().put("text", it.text)))
-        )
-    }
-    val body = JSONObject()
-        .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
-        .put("contents", contents)
+fun geminiPost(key: String, body: JSONObject): String {
     val url = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
     val c = URL(url).openConnection() as HttpURLConnection
     try {
@@ -77,6 +68,41 @@ fun askGemini(key: String, history: List<Msg>): String {
     }
 }
 
+fun askGemini(key: String, history: List<Msg>): String {
+    val contents = JSONArray()
+    history.forEach {
+        contents.put(
+            JSONObject().put("role", if (it.fromUser) "user" else "model")
+                .put("parts", JSONArray().put(JSONObject().put("text", it.text)))
+        )
+    }
+    val body = JSONObject()
+        .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
+        .put("contents", contents)
+    return geminiPost(key, body)
+}
+
+fun generateLesson(key: String, topic: String): Lesson {
+    val prompt = """
+Create 6 beginner multiple-choice English exercises for a Spanish speaker about the topic: $topic.
+Mix two types:
+1) translation: the prompt is in Spanish like ¿Cómo se dice «...»? with 3 English options, or an English word with 3 Spanish options;
+2) fill in the blank: an English sentence with ___ and 3 English options.
+Return ONLY a JSON object with this shape:
+{"emoji":"one emoji","title":"short title in Spanish","qs":[{"prompt":"...","options":["a","b","c"],"answer":0,"say":"the English text to pronounce"}]}
+"answer" is the 0-based index of the correct option. Vary the position of the correct option.
+""".trimIndent()
+    val body = JSONObject()
+        .put("contents", JSONArray().put(JSONObject().put("role", "user")
+            .put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+        .put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+    val raw = geminiPost(key, body).replace("```json", "").replace("```", "").trim()
+    val o = JSONObject(raw)
+    val qs = parseQs(o.getJSONArray("qs")).filter { it.options.size >= 2 && it.answer in it.options.indices }
+    if (qs.size < 3) throw Exception("Lección inválida")
+    return Lesson(o.optString("title", topic), o.optString("emoji", "✨"), qs)
+}
+
 class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
 
@@ -86,11 +112,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("p", MODE_PRIVATE)
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(primary = Green)) {
-                App(
-                    savedKey = prefs.getString("key", "") ?: "",
-                    saveKey = { prefs.edit().putString("key", it).apply() },
-                    speak = { tts?.speak(it, TextToSpeech.QUEUE_FLUSH, null, null) }
-                )
+                App(prefs, speak = { tts?.speak(it, TextToSpeech.QUEUE_FLUSH, null, null) })
             }
         }
     }
@@ -102,21 +124,45 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun App(savedKey: String, saveKey: (String) -> Unit, speak: (String) -> Unit) {
+fun App(prefs: SharedPreferences, speak: (String) -> Unit) {
     var screen by remember { mutableStateOf("home") }
     var lessonIdx by remember { mutableIntStateOf(0) }
+    val custom = remember {
+        mutableStateListOf<Lesson>().apply {
+            try {
+                val arr = JSONArray(prefs.getString("lessons", "[]"))
+                for (n in 0 until arr.length()) add(lessonFromJson(arr.getJSONObject(n)))
+            } catch (e: Exception) {
+            }
+        }
+    }
+    fun persist() {
+        prefs.edit().putString("lessons", JSONArray(custom.map { it.toJson() }).toString()).apply()
+    }
+    val all = LESSONS + custom
+    val key = prefs.getString("key", "") ?: ""
     BackHandler(enabled = screen != "home") { screen = "home" }
     Box(Modifier.fillMaxSize().background(Color.White).safeDrawingPadding()) {
         when (screen) {
-            "chat" -> Chat(savedKey, saveKey, speak) { screen = "home" }
-            "lesson" -> LessonScreen(LESSONS[lessonIdx], speak) { screen = "home" }
-            else -> Home({ screen = "chat" }) { lessonIdx = it; screen = "lesson" }
+            "chat" -> Chat(key, { prefs.edit().putString("key", it).apply() }, speak) { screen = "home" }
+            "create" -> CreateScreen(key, { l ->
+                custom.add(l); persist()
+                lessonIdx = LESSONS.size + custom.size - 1
+                screen = "lesson"
+            }) { screen = "home" }
+            "lesson" -> LessonScreen(all[lessonIdx], speak) { screen = "home" }
+            else -> Home(
+                all, LESSONS.size,
+                { screen = "chat" }, { screen = "create" },
+                { n -> lessonIdx = n; screen = "lesson" },
+                { n -> custom.removeAt(n - LESSONS.size); persist() }
+            )
         }
     }
 }
 
 @Composable
-fun BigCard(emoji: String, title: String, sub: String, onClick: () -> Unit) {
+fun BigCard(emoji: String, title: String, sub: String, onClick: () -> Unit, onDelete: (() -> Unit)? = null) {
     val shape = RoundedCornerShape(16.dp)
     Row(
         Modifier.fillMaxWidth().clip(shape).border(2.dp, Gray, shape)
@@ -125,26 +171,38 @@ fun BigCard(emoji: String, title: String, sub: String, onClick: () -> Unit) {
     ) {
         Text(emoji, fontSize = 32.sp)
         Spacer(Modifier.width(14.dp))
-        Column {
+        Column(Modifier.weight(1f)) {
             Text(title, color = Ink, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
             Text(sub, color = Color(0xFF777777))
+        }
+        if (onDelete != null) {
+            Text("🗑", fontSize = 22.sp, modifier = Modifier.clickable { onDelete() }.padding(8.dp))
         }
     }
 }
 
 @Composable
-fun Home(openChat: () -> Unit, openLesson: (Int) -> Unit) {
+fun Home(
+    all: List<Lesson>, builtIn: Int,
+    openChat: () -> Unit, create: () -> Unit,
+    openLesson: (Int) -> Unit, delete: (Int) -> Unit
+) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Speak Up", color = Green, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
+        Text("Pepe English", color = Green, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
         Text("Practica inglés en lecciones cortas", color = Ink, fontSize = 16.sp)
         Spacer(Modifier.height(4.dp))
-        BigCard("💬", "Chat con tutor IA", "Conversa y recibe correcciones", openChat)
+        BigCard("💬", "Chat con tutor IA", "Conversa y recibe correcciones", onClick = openChat)
+        BigCard("✨", "Crear lección con IA", "Elige cualquier tema", onClick = create)
         Text("Lecciones", color = Ink, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
-        LESSONS.forEachIndexed { n, l ->
-            BigCard(l.emoji, l.title, "${l.qs.size} ejercicios") { openLesson(n) }
+        all.forEachIndexed { n, l ->
+            BigCard(
+                l.emoji, l.title, "${l.qs.size} ejercicios",
+                onClick = { openLesson(n) },
+                onDelete = if (n >= builtIn) ({ delete(n) }) else null
+            )
         }
     }
 }

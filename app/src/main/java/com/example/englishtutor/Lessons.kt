@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,6 +18,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 val Green = Color(0xFF58CC02)
 val GreenDark = Color(0xFF58A700)
@@ -168,6 +174,63 @@ fun LessonScreen(lesson: Lesson, speak: (String) -> Unit, close: () -> Unit) {
                     if (ok) good++
                     speak(q.say)
                 }
+            }
+        }
+    }
+}
+
+fun Lesson.toJson(): JSONObject = JSONObject().put("title", title).put("emoji", emoji).put(
+    "qs", JSONArray(qs.map {
+        JSONObject().put("prompt", it.prompt).put("options", JSONArray(it.options))
+            .put("answer", it.answer).put("say", it.say)
+    })
+)
+
+fun parseQs(arr: JSONArray): List<Q> = (0 until arr.length()).map { n ->
+    val o = arr.getJSONObject(n)
+    val opts = o.getJSONArray("options")
+    Q(
+        o.getString("prompt"),
+        (0 until opts.length()).map { opts.getString(it) },
+        o.getInt("answer"),
+        o.optString("say", o.getString("prompt"))
+    )
+}
+
+fun lessonFromJson(o: JSONObject) =
+    Lesson(o.getString("title"), o.getString("emoji"), parseQs(o.getJSONArray("qs")))
+
+@Composable
+fun CreateScreen(key: String, onDone: (Lesson) -> Unit, back: () -> Unit) {
+    var topic by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text("←", fontSize = 26.sp, color = Ink, modifier = Modifier.clickable { back() })
+        Text("Crear lección con IA", color = Green, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+        Text("Escribe un tema, por ejemplo: en el restaurante, entrevista de trabajo, el clima.", color = Ink)
+        OutlinedTextField(
+            value = topic, onValueChange = { topic = it }, label = { Text("Tema") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        if (key.isEmpty()) Text("Primero guarda tu API key en el chat.", color = RedDark)
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Green)
+        if (error.isNotEmpty()) Text(error, color = RedDark)
+        Btn(
+            "Generar", Green, GreenDark, Modifier.fillMaxWidth(),
+            enabled = topic.isNotBlank() && key.isNotEmpty() && !loading
+        ) {
+            loading = true; error = ""
+            scope.launch {
+                try {
+                    val l = withContext(Dispatchers.IO) { generateLesson(key, topic.trim()) }
+                    onDone(l)
+                } catch (e: Exception) {
+                    error = if (e.message?.startsWith("Error ") == true) e.message!!
+                    else "No pude crear la lección. Intenta con otro tema."
+                }
+                loading = false
             }
         }
     }
