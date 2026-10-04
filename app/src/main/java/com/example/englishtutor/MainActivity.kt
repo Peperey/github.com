@@ -82,9 +82,14 @@ fun askGemini(key: String, history: List<Msg>): String {
     return geminiPost(key, body)
 }
 
-fun generateLesson(key: String, topic: String): Lesson {
+fun generateLesson(key: String, topic: String, level: String): Lesson {
+    val levelEn = when (level) {
+        "Intermedio" -> "intermediate (B1-B2)"
+        "Avanzado" -> "advanced (C1)"
+        else -> "beginner (A1-A2)"
+    }
     val prompt = """
-Create 6 beginner multiple-choice English exercises for a Spanish speaker about the topic: $topic.
+Create 6 multiple-choice English exercises at $levelEn level for a Spanish speaker about the topic: $topic.
 Mix two types:
 1) translation: the prompt is in Spanish like ¿Cómo se dice «...»? with 3 English options, or an English word with 3 Spanish options;
 2) fill in the blank: an English sentence with ___ and 3 English options.
@@ -100,7 +105,7 @@ Return ONLY a JSON object with this shape:
     val o = JSONObject(raw)
     val qs = parseQs(o.getJSONArray("qs")).filter { it.options.size >= 2 && it.answer in it.options.indices }
     if (qs.size < 3) throw Exception("Lección inválida")
-    return Lesson(o.optString("title", topic), o.optString("emoji", "✨"), qs)
+    return Lesson(o.optString("title", topic), o.optString("emoji", "✨"), qs, level)
 }
 
 class MainActivity : ComponentActivity() {
@@ -127,6 +132,9 @@ class MainActivity : ComponentActivity() {
 fun App(prefs: SharedPreferences, speak: (String) -> Unit) {
     var screen by remember { mutableStateOf("home") }
     var lessonIdx by remember { mutableIntStateOf(0) }
+    var xp by remember { mutableIntStateOf(prefs.getInt("xp", 0)) }
+    var streak by remember { mutableIntStateOf(prefs.getInt("streak", 0)) }
+    var lastDay by remember { mutableLongStateOf(prefs.getLong("lastDay", -1L)) }
     val custom = remember {
         mutableStateListOf<Lesson>().apply {
             try {
@@ -139,8 +147,18 @@ fun App(prefs: SharedPreferences, speak: (String) -> Unit) {
     fun persist() {
         prefs.edit().putString("lessons", JSONArray(custom.map { it.toJson() }).toString()).apply()
     }
+    fun finishLesson(good: Int) {
+        val today = java.time.LocalDate.now().toEpochDay()
+        if (lastDay != today) {
+            streak = if (lastDay == today - 1) streak + 1 else 1
+            lastDay = today
+        }
+        xp += good * 10
+        prefs.edit().putInt("xp", xp).putInt("streak", streak).putLong("lastDay", lastDay).apply()
+    }
     val all = LESSONS + custom
     val key = prefs.getString("key", "") ?: ""
+    val shownStreak = if (lastDay >= java.time.LocalDate.now().toEpochDay() - 1) streak else 0
     BackHandler(enabled = screen != "home") { screen = "home" }
     Box(Modifier.fillMaxSize().background(Color.White).safeDrawingPadding()) {
         when (screen) {
@@ -150,9 +168,9 @@ fun App(prefs: SharedPreferences, speak: (String) -> Unit) {
                 lessonIdx = LESSONS.size + custom.size - 1
                 screen = "lesson"
             }) { screen = "home" }
-            "lesson" -> LessonScreen(all[lessonIdx], speak) { screen = "home" }
+            "lesson" -> LessonScreen(all[lessonIdx], speak, { finishLesson(it) }) { screen = "home" }
             else -> Home(
-                all, LESSONS.size,
+                all, LESSONS.size, shownStreak, xp,
                 { screen = "chat" }, { screen = "create" },
                 { n -> lessonIdx = n; screen = "lesson" },
                 { n -> custom.removeAt(n - LESSONS.size); persist() }
@@ -183,7 +201,7 @@ fun BigCard(emoji: String, title: String, sub: String, onClick: () -> Unit, onDe
 
 @Composable
 fun Home(
-    all: List<Lesson>, builtIn: Int,
+    all: List<Lesson>, builtIn: Int, streak: Int, xp: Int,
     openChat: () -> Unit, create: () -> Unit,
     openLesson: (Int) -> Unit, delete: (Int) -> Unit
 ) {
@@ -193,13 +211,17 @@ fun Home(
     ) {
         Text("Pepe English", color = Green, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
         Text("Practica inglés en lecciones cortas", color = Ink, fontSize = 16.sp)
-        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Stat("🔥", "$streak", if (streak == 1) "día" else "días", Modifier.weight(1f))
+            Stat("⭐", "$xp", "XP", Modifier.weight(1f))
+        }
         BigCard("💬", "Chat con tutor IA", "Conversa y recibe correcciones", onClick = openChat)
-        BigCard("✨", "Crear lección con IA", "Elige cualquier tema", onClick = create)
+        BigCard("✨", "Crear lección con IA", "Elige tema y nivel", onClick = create)
         Text("Lecciones", color = Ink, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
         all.forEachIndexed { n, l ->
             BigCard(
-                l.emoji, l.title, "${l.qs.size} ejercicios",
+                l.emoji, l.title,
+                "${l.qs.size} ejercicios" + if (l.level.isNotEmpty()) " · ${l.level}" else "",
                 onClick = { openLesson(n) },
                 onDelete = if (n >= builtIn) ({ delete(n) }) else null
             )

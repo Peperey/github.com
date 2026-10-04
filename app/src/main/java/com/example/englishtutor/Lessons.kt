@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +35,7 @@ val Gray = Color(0xFFE5E5E5)
 val Ink = Color(0xFF4B4B4B)
 
 data class Q(val prompt: String, val options: List<String>, val answer: Int, val say: String)
-data class Lesson(val title: String, val emoji: String, val qs: List<Q>)
+data class Lesson(val title: String, val emoji: String, val qs: List<Q>, val level: String = "")
 
 val LESSONS = listOf(
     Lesson("Saludos", "👋", listOf(
@@ -95,13 +96,14 @@ fun Btn(
 }
 
 @Composable
-fun LessonScreen(lesson: Lesson, speak: (String) -> Unit, close: () -> Unit) {
+fun LessonScreen(lesson: Lesson, speak: (String) -> Unit, onFinish: (Int) -> Unit, close: () -> Unit) {
     var i by remember { mutableIntStateOf(0) }
     var sel by remember { mutableIntStateOf(-1) }
     var checked by remember { mutableStateOf(false) }
     var good by remember { mutableIntStateOf(0) }
 
     if (i >= lesson.qs.size) {
+        LaunchedEffect(Unit) { onFinish(good) }
         Column(
             Modifier.fillMaxSize().padding(24.dp),
             Arrangement.Center, Alignment.CenterHorizontally
@@ -109,6 +111,7 @@ fun LessonScreen(lesson: Lesson, speak: (String) -> Unit, close: () -> Unit) {
             Text("🎉", fontSize = 64.sp)
             Text("¡Lección completada!", color = Green, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
             Text("Acertaste $good de ${lesson.qs.size}", color = Ink, fontSize = 18.sp)
+            Text("+${good * 10} XP", color = Blue, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.height(24.dp))
             Btn("Volver", Green, GreenDark, Modifier.fillMaxWidth(), onClick = close)
         }
@@ -179,7 +182,7 @@ fun LessonScreen(lesson: Lesson, speak: (String) -> Unit, close: () -> Unit) {
     }
 }
 
-fun Lesson.toJson(): JSONObject = JSONObject().put("title", title).put("emoji", emoji).put(
+fun Lesson.toJson(): JSONObject = JSONObject().put("title", title).put("emoji", emoji).put("level", level).put(
     "qs", JSONArray(qs.map {
         JSONObject().put("prompt", it.prompt).put("options", JSONArray(it.options))
             .put("answer", it.answer).put("say", it.say)
@@ -198,11 +201,41 @@ fun parseQs(arr: JSONArray): List<Q> = (0 until arr.length()).map { n ->
 }
 
 fun lessonFromJson(o: JSONObject) =
-    Lesson(o.getString("title"), o.getString("emoji"), parseQs(o.getJSONArray("qs")))
+    Lesson(o.getString("title"), o.getString("emoji"), parseQs(o.getJSONArray("qs")), o.optString("level", ""))
+
+@Composable
+fun Chip(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Text(
+        text, color = if (selected) GreenDark else Ink, fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
+        modifier = modifier.clip(shape)
+            .background(if (selected) Color(0xFFD7FFB8) else Color.White)
+            .border(2.dp, if (selected) Green else Gray, shape)
+            .clickable(onClick = onClick).padding(vertical = 12.dp)
+    )
+}
+
+@Composable
+fun Stat(emoji: String, value: String, label: String, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        modifier.clip(shape).border(2.dp, Gray, shape).padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(emoji, fontSize = 26.sp)
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(value, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+            Text(label, color = Color(0xFF777777))
+        }
+    }
+}
 
 @Composable
 fun CreateScreen(key: String, onDone: (Lesson) -> Unit, back: () -> Unit) {
     var topic by remember { mutableStateOf("") }
+    var level by remember { mutableStateOf("Básico") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
@@ -214,6 +247,12 @@ fun CreateScreen(key: String, onDone: (Lesson) -> Unit, back: () -> Unit) {
             value = topic, onValueChange = { topic = it }, label = { Text("Tema") },
             modifier = Modifier.fillMaxWidth()
         )
+        Text("Nivel", color = Ink, fontWeight = FontWeight.ExtraBold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Básico", "Intermedio", "Avanzado").forEach { l ->
+                Chip(l, level == l, Modifier.weight(1f)) { level = l }
+            }
+        }
         if (key.isEmpty()) Text("Primero guarda tu API key en el chat.", color = RedDark)
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Green)
         if (error.isNotEmpty()) Text(error, color = RedDark)
@@ -224,7 +263,7 @@ fun CreateScreen(key: String, onDone: (Lesson) -> Unit, back: () -> Unit) {
             loading = true; error = ""
             scope.launch {
                 try {
-                    val l = withContext(Dispatchers.IO) { generateLesson(key, topic.trim()) }
+                    val l = withContext(Dispatchers.IO) { generateLesson(key, topic.trim(), level) }
                     onDone(l)
                 } catch (e: Exception) {
                     error = if (e.message?.startsWith("Error ") == true) e.message!!
